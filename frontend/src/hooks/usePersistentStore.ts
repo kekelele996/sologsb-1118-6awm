@@ -1,22 +1,25 @@
 import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
-import type { Artifact, Relation, Stratum, Trench } from '@/types'
+import type { Artifact, Mismatch, ReconcileRun, Relation, Stratum, Trench } from '@/types'
+import { backfillArtifact, backfillStratum } from '@/domain/migrate'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：探方 / 地层单位 / 出土物 / 层位关系 四张表 + 元数据表 */
+/** Dexie 封装：探方 / 地层单位 / 出土物 / 层位关系 / 对账运行 / 对账差异 + 元数据表 */
 class TrenchLogDb extends Dexie {
   trenches!: Table<Trench, string>
   strata!: Table<Stratum, string>
   artifacts!: Table<Artifact, string>
   relations!: Table<Relation, string>
+  reconcileRuns!: Table<ReconcileRun, string>
+  mismatches!: Table<Mismatch, string>
   meta!: Table<MetaRow, string>
 
   constructor() {
@@ -29,7 +32,7 @@ class TrenchLogDb extends Dexie {
       meta: 'key'
     })
     // v2：地层单位新增「开口层位」字段，迁移时为历史数据补齐默认值
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         trenches: 'id, code, area, backfilled',
         strata: 'id, trenchId, code, type, topDepth',
@@ -49,6 +52,32 @@ class TrenchLogDb extends Dexie {
               stratum.inclusions = []
             }
           })
+      })
+    // v3：双侧归属启用。旧数据没记归属，升级时按现有单位回填（单位号快照、状态、归属）再启用；
+    // 新增对账运行与对账差异两张表。
+    this.version(SCHEMA_VERSION)
+      .stores({
+        trenches: 'id, code, area, backfilled',
+        strata: 'id, trenchId, code, type, topDepth, lifecycle',
+        artifacts: 'id, stratumId, code, category, date, status, unitCode',
+        relations: 'id, unitAId, unitBId, type, basis',
+        reconcileRuns: 'id, startedAt',
+        mismatches: 'id, runId, unitCode, status',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        const strata = await tx.table<Stratum, string>('strata').toArray()
+        const strataById = new Map<string, Stratum>(strata.map((item) => [item.id, item]))
+        await tx
+          .table<Stratum, string>('strata')
+          .toCollection()
+          .modify((stratum) => backfillStratum(stratum))
+        await tx
+          .table<Artifact, string>('artifacts')
+          .toCollection()
+          .modify((artifact) => backfillArtifact(artifact, strataById))
+        // 回填完成，标记归属机制启用
+        await tx.table<MetaRow, string>('meta').put({ key: 'ownershipBackfilled', value: 1 })
       })
   }
 }
@@ -134,7 +163,10 @@ export async function seedDemoData(): Promise<void> {
       inclusions: ['陶片', '炭屑'],
       formation: '近现代耕土层',
       date: today,
-      drawingNo: 'T0501-北壁-01'
+      drawingNo: 'T0501-北壁-01',
+      owner: 'field',
+      lifecycle: 'active',
+      successorCodes: []
     },
     {
       id: 'st_0501_l2',
@@ -148,7 +180,10 @@ export async function seedDemoData(): Promise<void> {
       inclusions: ['陶片', '骨'],
       formation: '汉代文化层',
       date: today,
-      drawingNo: 'T0501-北壁-02'
+      drawingNo: 'T0501-北壁-02',
+      owner: 'field',
+      lifecycle: 'active',
+      successorCodes: []
     },
     {
       id: 'st_0501_h12',
@@ -162,7 +197,10 @@ export async function seedDemoData(): Promise<void> {
       inclusions: ['陶片', '骨', '炭屑'],
       formation: '生活垃圾坑',
       date: today,
-      drawingNo: 'T0501-H12-平剖面'
+      drawingNo: 'T0501-H12-平剖面',
+      owner: 'field',
+      lifecycle: 'active',
+      successorCodes: []
     },
     {
       id: 'st_0502_l1',
@@ -176,7 +214,10 @@ export async function seedDemoData(): Promise<void> {
       inclusions: ['陶片'],
       formation: '耕土层',
       date: today,
-      drawingNo: 'T0502-西壁-01'
+      drawingNo: 'T0502-西壁-01',
+      owner: 'field',
+      lifecycle: 'active',
+      successorCodes: []
     }
   ])
 
@@ -193,7 +234,11 @@ export async function seedDemoData(): Promise<void> {
       z: 0.42,
       date: today,
       collector: '祁野',
-      tempLocation: '工地临时柜 A-2'
+      tempLocation: '工地临时柜 A-2',
+      owner: 'lab',
+      unitCode: 'L02',
+      status: 'confirmed',
+      pendingReason: ''
     },
     {
       id: 'af_002',
@@ -207,7 +252,29 @@ export async function seedDemoData(): Promise<void> {
       z: 1.05,
       date: today,
       collector: '祁野',
-      tempLocation: '工地临时柜 A-3'
+      tempLocation: '工地临时柜 A-3',
+      owner: 'lab',
+      unitCode: 'H12',
+      status: 'confirmed',
+      pendingReason: ''
+    },
+    {
+      id: 'af_003',
+      stratumId: 'st_0501_h12',
+      code: 'T0501H12:2',
+      category: '陶器',
+      count: 2,
+      completeness: '残片',
+      x: 2.8,
+      y: 3.2,
+      z: 1.62,
+      date: today,
+      collector: '祁野',
+      tempLocation: '整理室周转箱 B-1',
+      owner: 'lab',
+      unitCode: 'H12',
+      status: 'pending',
+      pendingReason: 'depth-out-of-range'
     }
   ])
 

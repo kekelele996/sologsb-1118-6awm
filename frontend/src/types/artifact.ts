@@ -6,7 +6,9 @@ export type ArtifactCategory = (typeof ARTIFACT_CATEGORIES)[number]
 export const COMPLETENESS = ['完整', '可复原', '残片'] as const
 export type Completeness = (typeof COMPLETENESS)[number]
 
-/** Artifact 出土物 */
+import type { ArtifactStatus, PendingReason } from './ownership'
+
+/** Artifact 出土物（器物编号、件数、临时存放由整理室填，整理室侧持有） */
 export interface Artifact {
   id: string
   /** 所属地层单位（登记时锁定） */
@@ -28,4 +30,12 @@ export interface Artifact {
   collector: string
   /** 临时存放位置 */
   tempLocation: string
+  /** 归属侧：出土物登记归整理室 */
+  owner: 'lab'
+  /** 登记时认下的单位号快照（两侧对账键） */
+  unitCode: string
+  /** 状态：已确认 / 待核（挂起等记录员核） */
+  status: ArtifactStatus
+  /** 待核原因（已确认时为空串） */
+  pendingReason: PendingReason | ''
 }

@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Inclusion, Stratum, UnitType } from '@/types'
-import { INCLUSIONS, UNIT_TYPES, isCodeDuplicated, isDepthInverted, stratumThickness } from '@/types'
+import { INCLUSIONS, LIFECYCLE_LABELS, UNIT_TYPES, isCodeDuplicated, isDepthInverted, stratumThickness } from '@/types'
 import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import TrenchTag from '@/components/common/TrenchTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
@@ -64,6 +64,10 @@ function trenchLabel(trenchId: string): string {
 
 function artifactsOf(stratumId: string): number {
   return artifactState.artifacts.filter((item) => item.stratumId === stratumId).reduce((sum, item) => sum + item.count, 0)
+}
+
+function pendingOf(stratumId: string): number {
+  return artifactState.artifacts.filter((item) => item.stratumId === stratumId && item.status === 'pending').length
 }
 
 function invertedOf(stratum: Stratum): boolean {
@@ -148,6 +152,7 @@ async function submit(): Promise<void> {
     ElMessage.error(`同一探方内单位号「${candidate.code}」已存在，请更换`)
     return
   }
+  const origin = editingId.value ? stratumState.strata.find((item) => item.id === editingId.value) : null
   const row: Stratum = {
     id: candidate.id,
     trenchId: candidate.trenchId,
@@ -160,7 +165,10 @@ async function submit(): Promise<void> {
     inclusions: [...form.inclusions],
     formation: form.formation.trim(),
     date: form.date,
-    drawingNo: form.drawingNo.trim()
+    drawingNo: form.drawingNo.trim(),
+    owner: 'field',
+    lifecycle: origin?.lifecycle ?? 'active',
+    successorCodes: origin?.successorCodes ?? []
   }
   await stratumStore.getState().save(row)
   if (isDepthInverted(row)) {
@@ -172,6 +180,10 @@ async function submit(): Promise<void> {
 }
 
 async function remove(stratum: Stratum): Promise<void> {
+  if (stratum.lifecycle !== 'active') {
+    ElMessage.error(`「${stratum.code}」已${LIFECYCLE_LABELS[stratum.lifecycle]}，档案与层位关系按原编号保留，不能删除`)
+    return
+  }
   const count = artifactState.artifacts.filter((item) => item.stratumId === stratum.id).length
   const relations = relationState.relations.filter(
     (item) => item.unitAId === stratum.id || item.unitBId === stratum.id
@@ -193,15 +205,104 @@ async function applyBatchType(): Promise<void> {
   await stratumStore.getState().bulkSetType(selectedIds.value, batchType.value)
   ElMessage.success(`已把 ${selectedIds.value.length} 个单位的类型调整为「${batchType.value}」`)
 }
+
+/* ---------- 拆分 / 合并（记录员操作；整理室挂在底下的出土物退回待核，层位关系照旧） ---------- */
+
+const splitVisible = ref(false)
+const splitSource = ref<Stratum | null>(null)
+const splitParts = ref<{ code: string; topDepth: number; bottomDepth: number }[]>([])
+
+function openSplit(stratum: Stratum): void {
+  splitSource.value = stratum
+  const top = Math.min(stratum.topDepth, stratum.bottomDepth)
+  const bottom = Math.max(stratum.topDepth, stratum.bottomDepth)
+  const mid = Math.round(((top + bottom) / 2) * 100) / 100
+  splitParts.value = [
+    { code: `${stratum.code}-1`, topDepth: top, bottomDepth: mid },
+    { code: `${stratum.code}-2`, topDepth: mid, bottomDepth: bottom }
+  ]
+  splitVisible.value = true
+}
+
+function addSplitPart(): void {
+  const source = splitSource.value
+  if (!source) return
+  const bottom = Math.max(source.topDepth, source.bottomDepth)
+  splitParts.value.push({ code: `${source.code}-${splitParts.value.length + 1}`, topDepth: bottom, bottomDepth: bottom })
+}
+
+function removeSplitPart(index: number): void {
+  if (splitParts.value.length <= 2) return
+  splitParts.value.splice(index, 1)
+}
+
+async function submitSplit(): Promise<void> {
+  const source = splitSource.value
+  if (!source) return
+  const parts = splitParts.value.map((part) => ({
+    code: part.code.trim().toUpperCase(),
+    topDepth: Number(part.topDepth) || 0,
+    bottomDepth: Number(part.bottomDepth) || 0
+  }))
+  if (parts.some((part) => !part.code)) {
+    ElMessage.warning('请为每个新单位填写单位号')
+    return
+  }
+  if (new Set(parts.map((part) => part.code)).size !== parts.length) {
+    ElMessage.error('新单位号之间不能重复')
+    return
+  }
+  const clash = parts.find((part) => isCodeDuplicated(stratumState.strata, { id: '__new__', trenchId: source.trenchId, code: part.code }))
+  if (clash) {
+    ElMessage.error(`同一探方内单位号「${clash.code}」已存在，请更换`)
+    return
+  }
+  const { returned } = await stratumStore.getState().split(source.id, parts)
+  ElMessage.success(
+    `「${source.code}」已拆分为 ${parts.map((part) => part.code).join('、')}；${returned} 件出土物退回待核，层位关系仍按原编号保留`
+  )
+  splitVisible.value = false
+}
+
+const mergeVisible = ref(false)
+const mergeSource = ref<Stratum | null>(null)
+const mergeTargetId = ref('')
+
+const mergeCandidates = computed(() =>
+  mergeSource.value
+    ? stratumState.strata.filter(
+        (item) => item.id !== mergeSource.value!.id && item.trenchId === mergeSource.value!.trenchId && item.lifecycle === 'active'
+      )
+    : []
+)
+
+function openMerge(stratum: Stratum): void {
+  mergeSource.value = stratum
+  mergeTargetId.value = ''
+  mergeVisible.value = true
+}
+
+async function submitMerge(): Promise<void> {
+  const source = mergeSource.value
+  if (!source) return
+  const target = stratumState.strata.find((item) => item.id === mergeTargetId.value)
+  if (!target) {
+    ElMessage.warning('请选择并入的目标单位')
+    return
+  }
+  const { returned } = await stratumStore.getState().merge(source.id, target.id)
+  ElMessage.success(`「${source.code}」已并掉，去向记为「${target.code}」；${returned} 件出土物退回待核，层位关系仍按原编号保留`)
+  mergeVisible.value = false
+}
 </script>
 
 <template>
   <div class="page">
     <div class="page-head">
       <div>
-        <h2 class="page-title">地层单位编目表</h2>
+        <h2 class="page-title">地层单位编目表（工地记录员）</h2>
         <p class="page-sub">
-          按类型与深度区间筛选；层序倒置（上界大于下界）与同一探方内单位号重复即时高亮提示，深度刻度条展示厚度。
+          单位号、上下界深度由记录员定；单位拆开或并掉后，整理室挂在底下的出土物退回待核，层位关系照旧按原编号保留。
         </p>
       </div>
       <el-button type="primary" @click="openCreate">
@@ -279,26 +380,37 @@ async function applyBatchType(): Promise<void> {
           <el-tag v-if="duplicatedOf(row)" type="warning" size="small" effect="dark" class="mini">重复</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="类型" width="120">
+      <el-table-column label="状态" width="130">
+        <template #default="{ row }: { row: Stratum }">
+          <el-tag v-if="row.lifecycle === 'active'" type="success" size="small" effect="plain">在册</el-tag>
+          <el-tooltip v-else :content="`去向：${row.successorCodes.join('、') || '—'}`" placement="top">
+            <el-tag type="info" size="small" effect="dark">{{ LIFECYCLE_LABELS[row.lifecycle] }}</el-tag>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <el-table-column label="类型" width="110">
         <template #default="{ row }: { row: Stratum }">
           <TrenchTag :unit-type="row.type" size="small" />
         </template>
       </el-table-column>
-      <el-table-column label="深度刻度" width="250">
+      <el-table-column label="深度刻度" width="240">
         <template #default="{ row }: { row: Stratum }">
-          <StratumDepthBar :stratum="row" :length="180" />
+          <StratumDepthBar :stratum="row" :length="170" />
         </template>
       </el-table-column>
-      <el-table-column label="开口层位" width="110" prop="openLayer" />
-      <el-table-column label="土质土色" min-width="150" prop="soil" show-overflow-tooltip />
-      <el-table-column label="包含物" width="150">
+      <el-table-column label="开口层位" width="100" prop="openLayer" />
+      <el-table-column label="土质土色" min-width="140" prop="soil" show-overflow-tooltip />
+      <el-table-column label="包含物" width="140">
         <template #default="{ row }: { row: Stratum }">
           <el-tag v-for="item in row.inclusions" :key="item" size="small" effect="plain" class="mini">{{ item }}</el-tag>
           <span v-if="row.inclusions.length === 0" class="muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="出土物" width="90">
-        <template #default="{ row }: { row: Stratum }">{{ artifactsOf(row.id) }} 件</template>
+      <el-table-column label="出土物" width="110">
+        <template #default="{ row }: { row: Stratum }">
+          {{ artifactsOf(row.id) }} 件
+          <el-tag v-if="pendingOf(row.id) > 0" type="warning" size="small" effect="dark" class="mini">待核 {{ pendingOf(row.id) }}</el-tag>
+        </template>
       </el-table-column>
       <el-table-column label="校验" width="110">
         <template #default="{ row }: { row: Stratum }">
@@ -307,10 +419,15 @@ async function applyBatchType(): Promise<void> {
           <el-tag v-else type="success" size="small" effect="plain">正常</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="130" fixed="right">
+      <el-table-column label="操作" width="230" fixed="right">
         <template #default="{ row }: { row: Stratum }">
-          <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
+          <template v-if="row.lifecycle === 'active'">
+            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="warning" size="small" @click="openSplit(row)">拆分</el-button>
+            <el-button link type="warning" size="small" @click="openMerge(row)">并掉</el-button>
+            <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
+          </template>
+          <span v-else class="muted">档案保留，不再改动</span>
         </template>
       </el-table-column>
     </el-table>
@@ -392,6 +509,55 @@ async function applyBatchType(): Promise<void> {
         <el-button type="primary" @click="submit">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="splitVisible" :title="`拆分单位「${splitSource?.code ?? ''}」`" width="640px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        class="alert"
+        title="拆分后原单位号保留为档案（层位关系照旧引用原编号），整理室挂在原单位底下的出土物全部退回待核"
+      />
+      <div v-for="(part, index) in splitParts" :key="index" class="split-row">
+        <el-input v-model="part.code" placeholder="新单位号" style="width: 140px" />
+        <el-input-number v-model="part.topDepth" :min="0" :step="0.05" :precision="2" :controls="false" placeholder="上界" style="width: 110px" />
+        <span>—</span>
+        <el-input-number v-model="part.bottomDepth" :min="0" :step="0.05" :precision="2" :controls="false" placeholder="下界" style="width: 110px" />
+        <span class="muted">m</span>
+        <el-button link type="danger" size="small" :disabled="splitParts.length <= 2" @click="removeSplitPart(index)">移除</el-button>
+      </div>
+      <el-button link type="primary" size="small" @click="addSplitPart">+ 增加一个新单位</el-button>
+      <template #footer>
+        <el-button @click="splitVisible = false">取消</el-button>
+        <el-button type="warning" @click="submitSplit">确认拆分</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="mergeVisible" :title="`并掉单位「${mergeSource?.code ?? ''}」`" width="480px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        class="alert"
+        title="并掉后原单位号保留为档案（层位关系照旧引用原编号），整理室挂在原单位底下的出土物全部退回待核"
+      />
+      <el-form label-width="90px">
+        <el-form-item label="并入目标" required>
+          <el-select v-model="mergeTargetId" placeholder="选择同探方在册单位" style="width: 100%">
+            <el-option
+              v-for="item in mergeCandidates"
+              :key="item.id"
+              :label="`${item.code}（${item.type} · ${item.topDepth}–${item.bottomDepth} m）`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="mergeVisible = false">取消</el-button>
+        <el-button type="warning" @click="submitMerge">确认并掉</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -411,5 +577,11 @@ async function applyBatchType(): Promise<void> {
   margin: 0;
   color: #c0392b;
   font-size: 12px;
+}
+.split-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 </style>

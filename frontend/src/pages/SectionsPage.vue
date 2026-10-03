@@ -36,7 +36,7 @@ const trench = computed(() => trenchState.trenches.find((item) => item.id === se
 
 const strata = computed(() =>
   stratumState.strata
-    .filter((item) => item.trenchId === selectedTrenchId.value)
+    .filter((item) => item.trenchId === selectedTrenchId.value && item.lifecycle === 'active')
     .sort((a, b) => a.topDepth - b.topDepth)
 )
 

@@ -6,7 +6,9 @@ export type UnitType = (typeof UNIT_TYPES)[number]
 export const INCLUSIONS = ['陶片', '骨', '炭屑', '石器'] as const
 export type Inclusion = (typeof INCLUSIONS)[number]
 
-/** Stratum 地层单位 */
+import type { UnitLifecycle } from './ownership'
+
+/** Stratum 地层单位（单位号、上下界深度由工地记录员定，工地侧持有） */
 export interface Stratum {
   id: string
   trenchId: string
@@ -27,6 +29,12 @@ export interface Stratum {
   date: string
   /** 绘图与拍照编号 */
   drawingNo: string
+  /** 归属侧：地层单位档案归工地记录员 */
+  owner: 'field'
+  /** 生命周期：在册 / 已拆分 / 已并掉（拆并后原编号保留，层位关系照旧引用） */
+  lifecycle: UnitLifecycle
+  /** 拆分/合并后的去向单位号（仅档案记录，不改写层位关系） */
+  successorCodes: string[]
 }
 
 /** 厚度（米） */

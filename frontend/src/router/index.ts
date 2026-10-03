@@ -27,6 +27,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '层位关系' }
   },
   {
+    path: '/reconcile',
+    name: 'reconcile',
+    component: () => import('@/pages/ReconcilePage.vue'),
+    meta: { title: '两侧对账' }
+  },
+  {
     path: '/sections',
     name: 'sections',
     component: () => import('@/pages/SectionsPage.vue'),
