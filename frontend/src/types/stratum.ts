@@ -1,3 +1,5 @@
+import type { Owner } from './ownership'
+
 /** 单位类型 */
 export const UNIT_TYPES = ['地层', '灰坑', '房址', '沟', '墓葬'] as const
 export type UnitType = (typeof UNIT_TYPES)[number]
@@ -27,6 +29,8 @@ export interface Stratum {
   date: string
   /** 绘图与拍照编号 */
   drawingNo: string
+  /** 数据归属：单位号、上下界深度由工地记录员定 */
+  owner: Owner
 }
 
 /** 厚度（米） */
@@ -37,6 +41,11 @@ export function stratumThickness(stratum: Pick<Stratum, 'topDepth' | 'bottomDept
 /** 层序是否倒置：上界深度大于下界深度即倒置 */
 export function isDepthInverted(stratum: Pick<Stratum, 'topDepth' | 'bottomDepth'>): boolean {
   return stratum.topDepth > stratum.bottomDepth
+}
+
+/** 出土深度是否落在单位深度区间（上下界均含）内 */
+export function isDepthInRange(z: number, stratum: Pick<Stratum, 'topDepth' | 'bottomDepth'>): boolean {
+  return z >= stratum.topDepth && z <= stratum.bottomDepth
 }
 
 /** 单位号在同一探方内是否重复 */

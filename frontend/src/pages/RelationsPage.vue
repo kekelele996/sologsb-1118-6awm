@@ -63,6 +63,15 @@ function unitLabel(stratumId: string): string {
   return `${stratum.code}（${trench ? `${trench.area}·${trench.code}` : '未知探方'} · ${stratum.type}）`
 }
 
+/** 已存关系的单位展示：单位拆分/并掉后，照旧按原编号留着 */
+function relationUnitLabel(relation: Relation, side: 'A' | 'B'): string {
+  const stratumId = side === 'A' ? relation.unitAId : relation.unitBId
+  const snapshot = side === 'A' ? relation.unitACode : relation.unitBCode
+  const stratum = stratumState.strata.find((item) => item.id === stratumId)
+  if (stratum) return unitLabel(stratumId)
+  return `${snapshot || '未知单位'}（原编号 · 单位已停用）`
+}
+
 function resetForm(): void {
   editingId.value = null
   form.type = '叠压'
@@ -94,7 +103,10 @@ async function submit(): Promise<void> {
     unitBId: form.unitBId,
     basis: form.basis,
     recorder: form.recorder.trim(),
-    note: form.note.trim()
+    note: form.note.trim(),
+    owner: 'site',
+    unitACode: stratumState.strata.find((item) => item.id === form.unitAId)?.code ?? '',
+    unitBCode: stratumState.strata.find((item) => item.id === form.unitBId)?.code ?? ''
   }
   await relationStore.getState().save(row)
   ElMessage.success(`已记录：${unitLabel(row.unitAId)} ${row.type} ${unitLabel(row.unitBId)}`)
@@ -115,7 +127,7 @@ function edit(relation: Relation): void {
 
 async function remove(relation: Relation): Promise<void> {
   await ElMessageBox.confirm(
-    `确认删除关系「${unitLabel(relation.unitAId)} ${relation.type} ${unitLabel(relation.unitBId)}」？`,
+    `确认删除关系「${relationUnitLabel(relation, 'A')} ${relation.type} ${relationUnitLabel(relation, 'B')}」？`,
     '删除确认',
     { type: 'warning' }
   )
@@ -134,7 +146,8 @@ function selectNode(nodeId: string): void {
       <div>
         <h2 class="page-title">层位关系视图</h2>
         <p class="page-sub">
-          以有向图展示叠压与打破关系；点击节点高亮其直接关系（前后继），新增关系时先做环路检测，闭合矛盾关系会被拒绝保存。
+          层位关系由工地记录员定，以有向图展示叠压与打破；点击节点高亮其直接关系（前后继），新增关系时先做环路检测。
+          单位拆分或并掉后，关系照旧按原编号留着。
         </p>
       </div>
       <el-select v-model="filterTrenchId" placeholder="全部探方" clearable style="width: 190px">
@@ -233,9 +246,9 @@ function selectNode(nodeId: string): void {
           <template #header>关系清单（{{ relationState.relations.length }}）</template>
           <ul class="rel-list">
             <li v-for="relation in relationState.relations" :key="relation.id">
-              <span class="mono">{{ unitLabel(relation.unitAId) }}</span>
+              <span class="mono">{{ relationUnitLabel(relation, 'A') }}</span>
               <el-tag size="small" effect="dark" class="type">{{ relation.type }}</el-tag>
-              <span class="mono">{{ unitLabel(relation.unitBId) }}</span>
+              <span class="mono">{{ relationUnitLabel(relation, 'B') }}</span>
               <span class="muted">（{{ relation.basis }} · {{ relation.recorder || '未填记录人' }}）</span>
               <span class="ops">
                 <el-button link type="primary" size="small" @click="edit(relation)">编辑</el-button>

@@ -1,3 +1,5 @@
+import type { ArtifactStatus, Owner } from './ownership'
+
 /** 器物类别 */
 export const ARTIFACT_CATEGORIES = ['陶器', '瓷器', '石器', '骨器', '铜器'] as const
 export type ArtifactCategory = (typeof ARTIFACT_CATEGORIES)[number]
@@ -28,4 +30,14 @@ export interface Artifact {
   collector: string
   /** 临时存放位置 */
   tempLocation: string
+  /** 数据归属：器物编号、件数、临时存放由整理室填 */
+  owner: Owner
+  /** 登记状态：registered 已入账 / pending 挂起待核 */
+  status: ArtifactStatus
+  /** 挂起原因（已入账时为空串） */
+  pendingReason: string
+  /** 所属探方快照（单位停用后仍能定位出土物来自哪个探方） */
+  trenchId: string
+  /** 单位号快照（对账按单位号进行；单位拆分/合并后原编号仍留底） */
+  stratumCode: string
 }

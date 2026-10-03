@@ -7,7 +7,7 @@ import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import TrenchTag from '@/components/common/TrenchTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { useStratumOrder } from '@/hooks/useStratumOrder'
-import { stratumStore } from '@/stores/stratumStore'
+import { stratumStore, type MergeDraft, type SplitPartDraft } from '@/stores/stratumStore'
 import { trenchStore } from '@/stores/trenchStore'
 import { artifactStore } from '@/stores/artifactStore'
 import { relationStore } from '@/stores/relationStore'
@@ -32,6 +32,15 @@ const batchType = ref<UnitType>('地层')
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
+
+/** 拆分：记录员把一个单位拆开 */
+const splitVisible = ref(false)
+const splitTarget = ref<Stratum | null>(null)
+const splitParts = ref<SplitPartDraft[]>([])
+
+/** 合并：记录员把选中的单位并掉 */
+const mergeVisible = ref(false)
+const mergeForm = reactive<MergeDraft>({ code: '', type: '地层', openLayer: '', topDepth: 0, bottomDepth: 0 })
 
 const form = reactive({
   trenchId: '',
@@ -160,7 +169,8 @@ async function submit(): Promise<void> {
     inclusions: [...form.inclusions],
     formation: form.formation.trim(),
     date: form.date,
-    drawingNo: form.drawingNo.trim()
+    drawingNo: form.drawingNo.trim(),
+    owner: 'site'
   }
   await stratumStore.getState().save(row)
   if (isDepthInverted(row)) {
@@ -193,6 +203,117 @@ async function applyBatchType(): Promise<void> {
   await stratumStore.getState().bulkSetType(selectedIds.value, batchType.value)
   ElMessage.success(`已把 ${selectedIds.value.length} 个单位的类型调整为「${batchType.value}」`)
 }
+
+/** 合并候选：勾选的单位按上界深度排序 */
+const mergeSources = computed(() =>
+  stratumState.strata.filter((item) => selectedIds.value.includes(item.id)).sort((a, b) => a.topDepth - b.topDepth)
+)
+
+function openSplit(stratum: Stratum): void {
+  splitTarget.value = stratum
+  const upper = Math.min(stratum.topDepth, stratum.bottomDepth)
+  const lower = Math.max(stratum.topDepth, stratum.bottomDepth)
+  const mid = Math.round(((upper + lower) / 2) * 100) / 100
+  splitParts.value = [
+    { code: `${stratum.code}①`, topDepth: upper, bottomDepth: mid },
+    { code: `${stratum.code}②`, topDepth: mid, bottomDepth: lower }
+  ]
+  splitVisible.value = true
+}
+
+function addSplitPart(): void {
+  const last = splitParts.value[splitParts.value.length - 1]
+  splitParts.value.push({ code: '', topDepth: last?.bottomDepth ?? 0, bottomDepth: last?.bottomDepth ?? 0 })
+}
+
+async function submitSplit(): Promise<void> {
+  const source = splitTarget.value
+  if (!source) return
+  if (splitParts.value.length < 2) {
+    ElMessage.warning('拆分至少需要两个新单位')
+    return
+  }
+  const codes = splitParts.value.map((part) => part.code.trim().toUpperCase())
+  if (codes.some((code) => !code)) {
+    ElMessage.warning('请填写每个新单位的单位号')
+    return
+  }
+  if (new Set(codes).size !== codes.length) {
+    ElMessage.error('新单位的单位号互不相同才能拆分')
+    return
+  }
+  if (splitParts.value.some((part) => part.topDepth < 0 || part.bottomDepth < 0)) {
+    ElMessage.warning('深度不能为负值')
+    return
+  }
+  // 原单位即将停用，查重时排除它自己
+  const others = stratumState.strata.filter((item) => item.id !== source.id)
+  const clash = codes.find((code) => isCodeDuplicated(others, { id: uid('st'), trenchId: source.trenchId, code }))
+  if (clash) {
+    ElMessage.error(`同一探方内单位号「${clash}」已存在，请更换`)
+    return
+  }
+  const artifactCount = artifactState.artifacts.filter((item) => item.stratumId === source.id).length
+  await ElMessageBox.confirm(
+    `拆分后原单位「${source.code}」停用，挂在它底下的 ${artifactCount} 件出土物退回待核；层位关系照旧按原编号留着。确认拆分？`,
+    '拆分确认',
+    { type: 'warning' }
+  )
+  const suspended = await stratumStore.getState().splitUnit(source.id, splitParts.value)
+  ElMessage.success(`已把「${source.code}」拆为 ${codes.join('、')}；${suspended} 件出土物退回待核`)
+  splitVisible.value = false
+  splitTarget.value = null
+}
+
+function openMerge(): void {
+  if (mergeSources.value.length < 2) {
+    ElMessage.warning('请先勾选同一探方内要合并的至少两个单位')
+    return
+  }
+  const trenchIds = new Set(mergeSources.value.map((item) => item.trenchId))
+  if (trenchIds.size > 1) {
+    ElMessage.error('只能合并同一探方内的单位，请重新勾选')
+    return
+  }
+  const first = mergeSources.value[0]
+  mergeForm.code = first.code
+  mergeForm.type = first.type
+  mergeForm.openLayer = first.openLayer
+  mergeForm.topDepth = Math.min(...mergeSources.value.map((item) => item.topDepth))
+  mergeForm.bottomDepth = Math.max(...mergeSources.value.map((item) => item.bottomDepth))
+  mergeVisible.value = true
+}
+
+async function submitMerge(): Promise<void> {
+  const sources = mergeSources.value
+  if (sources.length < 2) return
+  const code = mergeForm.code.trim().toUpperCase()
+  if (!code) {
+    ElMessage.warning('请填写合并后的单位号')
+    return
+  }
+  if (mergeForm.topDepth < 0 || mergeForm.bottomDepth < 0) {
+    ElMessage.warning('深度不能为负值')
+    return
+  }
+  // 原单位即将停用，查重时排除它们
+  const sourceIds = sources.map((item) => item.id)
+  const others = stratumState.strata.filter((item) => !sourceIds.includes(item.id))
+  if (isCodeDuplicated(others, { id: uid('st'), trenchId: sources[0].trenchId, code })) {
+    ElMessage.error(`同一探方内单位号「${code}」已存在，请更换`)
+    return
+  }
+  const artifactCount = artifactState.artifacts.filter((item) => sourceIds.includes(item.stratumId)).length
+  await ElMessageBox.confirm(
+    `合并后原单位 ${sources.map((item) => item.code).join('、')} 停用，挂在它们底下的 ${artifactCount} 件出土物退回待核；层位关系照旧按原编号留着。确认合并？`,
+    '合并确认',
+    { type: 'warning' }
+  )
+  const suspended = await stratumStore.getState().mergeUnits(sourceIds, { ...mergeForm, code })
+  ElMessage.success(`已并为单位「${code}」；${suspended} 件出土物退回待核`)
+  mergeVisible.value = false
+  selectedIds.value = []
+}
 </script>
 
 <template>
@@ -201,7 +322,8 @@ async function applyBatchType(): Promise<void> {
       <div>
         <h2 class="page-title">地层单位编目表</h2>
         <p class="page-sub">
-          按类型与深度区间筛选；层序倒置（上界大于下界）与同一探方内单位号重复即时高亮提示，深度刻度条展示厚度。
+          工地记录员台账：单位号、上下界深度由记录员定；层序倒置（上界大于下界）与同一探方内单位号重复即时高亮提示。
+          拆分或并掉单位后，整理室挂在原单位下的出土物退回待核，层位关系照旧按原编号留着。
         </p>
       </div>
       <el-button type="primary" @click="openCreate">
@@ -253,6 +375,7 @@ async function applyBatchType(): Promise<void> {
         <el-option v-for="type in UNIT_TYPES" :key="type" :label="type" :value="type" />
       </el-select>
       <el-button type="primary" plain @click="applyBatchType">批量调整类型</el-button>
+      <el-button type="warning" plain @click="openMerge">合并选中单位</el-button>
       <el-tag type="info" effect="plain">命中 {{ visible.length }} / {{ stratumState.strata.length }} 个单位</el-tag>
     </div>
 
@@ -300,6 +423,11 @@ async function applyBatchType(): Promise<void> {
       <el-table-column label="出土物" width="90">
         <template #default="{ row }: { row: Stratum }">{{ artifactsOf(row.id) }} 件</template>
       </el-table-column>
+      <el-table-column label="归属" width="110">
+        <template #default>
+          <el-tag type="warning" size="small" effect="plain">工地记录员</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="校验" width="110">
         <template #default="{ row }: { row: Stratum }">
           <el-tag v-if="invertedOf(row)" type="danger" size="small" effect="dark">层序倒置</el-tag>
@@ -307,9 +435,10 @@ async function applyBatchType(): Promise<void> {
           <el-tag v-else type="success" size="small" effect="plain">正常</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="130" fixed="right">
+      <el-table-column label="操作" width="180" fixed="right">
         <template #default="{ row }: { row: Stratum }">
           <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+          <el-button link type="warning" size="small" @click="openSplit(row)">拆分</el-button>
           <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -392,6 +521,73 @@ async function applyBatchType(): Promise<void> {
         <el-button type="primary" @click="submit">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="splitVisible" :title="`拆分单位 ${splitTarget?.code ?? ''}`" width="720px">
+      <template v-if="splitTarget">
+        <p class="dialog-note">
+          原单位 {{ splitTarget.code }}（{{ splitTarget.topDepth }}–{{ splitTarget.bottomDepth }} m）拆为
+          {{ splitParts.length }} 个新单位，新单位继承原单位的类型、开口层位、土质与包含物；拆分后原单位停用，
+          挂在它底下的出土物退回待核，层位关系照旧按原编号留着。
+        </p>
+        <div v-for="(part, index) in splitParts" :key="index" class="part-row">
+          <el-input v-model="part.code" placeholder="单位号" style="width: 140px" />
+          <el-input-number v-model="part.topDepth" :min="0" :step="0.05" :precision="2" :controls="false" placeholder="上界" style="width: 110px" />
+          <span>—</span>
+          <el-input-number v-model="part.bottomDepth" :min="0" :step="0.05" :precision="2" :controls="false" placeholder="下界" style="width: 110px" />
+          <span class="muted">厚 {{ Math.abs(part.bottomDepth - part.topDepth).toFixed(2) }} m</span>
+          <el-button link type="danger" size="small" :disabled="splitParts.length <= 2" @click="splitParts.splice(index, 1)">移除</el-button>
+        </div>
+        <el-button link type="primary" size="small" @click="addSplitPart">+ 添加一段</el-button>
+      </template>
+      <template #footer>
+        <el-button @click="splitVisible = false">取消</el-button>
+        <el-button type="warning" @click="submitSplit">确认拆分</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="mergeVisible" title="合并选中单位" width="620px">
+      <p class="dialog-note">
+        把 {{ mergeSources.map((item) => item.code).join('、') }} 并为一个单位；原单位停用，
+        挂在它们底下的出土物退回待核，层位关系照旧按原编号留着。土质、包含等着录继承最浅的原单位。
+      </p>
+      <el-form label-width="110px">
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="新单位号" required>
+              <el-input v-model="mergeForm.code" placeholder="合并后的单位号" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="单位类型">
+              <el-select v-model="mergeForm.type" style="width: 100%">
+                <el-option v-for="type in UNIT_TYPES" :key="type" :label="type" :value="type" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="12">
+          <el-col :span="8">
+            <el-form-item label="上界深度(m)">
+              <el-input-number v-model="mergeForm.topDepth" :min="0" :step="0.05" :precision="2" :controls="false" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="下界深度(m)">
+              <el-input-number v-model="mergeForm.bottomDepth" :min="0" :step="0.05" :precision="2" :controls="false" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="开口层位">
+              <el-input v-model="mergeForm.openLayer" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+      <template #footer>
+        <el-button @click="mergeVisible = false">取消</el-button>
+        <el-button type="warning" @click="submitMerge">确认合并</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -411,5 +607,18 @@ async function applyBatchType(): Promise<void> {
   margin: 0;
   color: #c0392b;
   font-size: 12px;
+}
+.dialog-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: #8a5a2b;
+  line-height: 1.7;
+}
+.part-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 </style>

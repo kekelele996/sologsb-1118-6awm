@@ -17,6 +17,7 @@ const menus = [
   { path: '/trenches', label: '探方清单', icon: 'Grid' },
   { path: '/strata', label: '地层单位编目', icon: 'Files' },
   { path: '/artifacts', label: '出土物登记', icon: 'Box' },
+  { path: '/reconcile', label: '对账与待核', icon: 'DocumentChecked' },
   { path: '/relations', label: '层位关系', icon: 'Share' },
   { path: '/sections', label: '四壁剖面示意', icon: 'DataLine' }
 ]
@@ -27,6 +28,7 @@ const stats = computed(() => [
   { label: '探方', value: trenchState.trenches.length },
   { label: '地层单位', value: stratumState.strata.length },
   { label: '出土物', value: artifactState.artifacts.length },
+  { label: '待核', value: artifactState.artifacts.filter((item) => item.status === 'pending').length },
   { label: '层位关系', value: relationState.relations.length }
 ])
 

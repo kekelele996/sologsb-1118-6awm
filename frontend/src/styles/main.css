@@ -73,3 +73,6 @@ body {
 .duplicate-row {
   background: #fff9e6 !important;
 }
+.pending-row {
+  background: #fdf6ec !important;
+}

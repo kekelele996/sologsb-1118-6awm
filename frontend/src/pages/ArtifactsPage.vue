@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { Artifact, ArtifactCategory, Completeness } from '@/types'
-import { ARTIFACT_CATEGORIES, COMPLETENESS } from '@/types'
+import type { Artifact, ArtifactCategory, ArtifactStatus, Completeness } from '@/types'
+import { ARTIFACT_CATEGORIES, ARTIFACT_STATUS_LABELS, COMPLETENESS, PENDING_REASONS, isDepthInRange } from '@/types'
 import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import UnitPicker from '@/components/common/UnitPicker.vue'
 import { useStore } from '@/hooks/usePersistentStore'
@@ -19,6 +19,7 @@ const trenchState = useStore(trenchStore)
 const pickTrenchId = ref('')
 const pickStratumId = ref('')
 const filterCategory = ref<ArtifactCategory | ''>('')
+const filterStatus = ref<ArtifactStatus | ''>('')
 const filterTrenchId = ref('')
 const editingId = ref<string | null>(null)
 
@@ -63,23 +64,32 @@ watch(
   { immediate: true }
 )
 
-function stratumOf(stratumId: string): string {
-  return stratumState.strata.find((item) => item.id === stratumId)?.code ?? '未知单位'
+function stratumOf(artifact: Artifact): string {
+  const unit = stratumState.strata.find((item) => item.id === artifact.stratumId)
+  if (unit) return unit.code
+  // 单位已停用（拆分/并掉）：按快照原编号留底
+  return artifact.stratumCode ? `${artifact.stratumCode}（已停用）` : '未知单位'
 }
 
-function trenchOf(stratumId: string): string {
-  const stratum = stratumState.strata.find((item) => item.id === stratumId)
-  if (!stratum) return '未知探方'
-  const trench = trenchState.trenches.find((item) => item.id === stratum.trenchId)
+function trenchOf(artifact: Artifact): string {
+  const stratum = stratumState.strata.find((item) => item.id === artifact.stratumId)
+  const trenchId = stratum?.trenchId ?? artifact.trenchId
+  const trench = trenchState.trenches.find((item) => item.id === trenchId)
   return trench ? `${trench.area} · ${trench.code}` : '未知探方'
+}
+
+function rowClass(param: { row: Artifact }): string {
+  return param.row.status === 'pending' ? 'pending-row' : ''
 }
 
 const visible = computed(() =>
   artifactState.artifacts.filter((item) => {
     if (filterCategory.value && item.category !== filterCategory.value) return false
+    if (filterStatus.value && item.status !== filterStatus.value) return false
     if (filterTrenchId.value) {
       const stratum = stratumState.strata.find((row) => row.id === item.stratumId)
-      if (!stratum || stratum.trenchId !== filterTrenchId.value) return false
+      const trenchId = stratum?.trenchId ?? item.trenchId
+      if (trenchId !== filterTrenchId.value) return false
     }
     return true
   })
@@ -140,12 +150,8 @@ async function submit(): Promise<void> {
     ElMessage.error(`器物编号「${form.code}」已存在`)
     return
   }
-  if (form.z < lockedStratum.value.topDepth || form.z > lockedStratum.value.bottomDepth) {
-    ElMessage.warning(
-      `出土深度 ${form.z} m 不在单位「${lockedStratum.value.code}」的深度区间（${lockedStratum.value.topDepth}–${lockedStratum.value.bottomDepth} m）内，请核对层位`
-    )
-    return
-  }
+  // 出土深度掉到单位深度区间外的先挂起来等记录员核，件数与位置照常保留、不挪
+  const inRange = isDepthInRange(Number(form.z) || 0, lockedStratum.value)
   const row: Artifact = {
     id: editingId.value ?? uid('af'),
     stratumId: lockedStratum.value.id,
@@ -158,10 +164,21 @@ async function submit(): Promise<void> {
     z: Number(form.z) || 0,
     date: form.date,
     collector: form.collector.trim(),
-    tempLocation: form.tempLocation.trim()
+    tempLocation: form.tempLocation.trim(),
+    owner: 'lab',
+    status: inRange ? 'registered' : 'pending',
+    pendingReason: inRange ? '' : PENDING_REASONS.depthOut,
+    trenchId: lockedStratum.value.trenchId,
+    stratumCode: lockedStratum.value.code
   }
   await artifactStore.getState().save(row)
-  ElMessage.success(`出土物 ${row.code} 已登记到 ${lockedStratum.value.code}`)
+  if (inRange) {
+    ElMessage.success(`出土物 ${row.code} 已登记到 ${lockedStratum.value.code}`)
+  } else {
+    ElMessage.warning(
+      `出土物 ${row.code} 已挂起待核：出土深度 ${row.z} m 不在单位「${lockedStratum.value.code}」的深度区间（${lockedStratum.value.topDepth}–${lockedStratum.value.bottomDepth} m）内，等记录员核；件数与临时存放位置保持原样`
+    )
+  }
   resetForm()
 }
 
@@ -176,8 +193,8 @@ function exportList(): void {
     '出土物清单.csv',
     visible.value.map((item) => ({
       code: item.code,
-      stratum: stratumOf(item.stratumId),
-      trench: trenchOf(item.stratumId),
+      stratum: stratumOf(item),
+      trench: trenchOf(item),
       category: item.category,
       count: item.count,
       completeness: item.completeness,
@@ -186,7 +203,8 @@ function exportList(): void {
       z: item.z,
       date: item.date,
       collector: item.collector,
-      tempLocation: item.tempLocation
+      tempLocation: item.tempLocation,
+      status: ARTIFACT_STATUS_LABELS[item.status]
     })) as unknown as Record<string, unknown>[],
     [
       { key: 'code', label: '器物编号' },
@@ -200,7 +218,8 @@ function exportList(): void {
       { key: 'z', label: 'Z 深度(m)' },
       { key: 'date', label: '出土日期' },
       { key: 'collector', label: '提取人' },
-      { key: 'tempLocation', label: '临时存放' }
+      { key: 'tempLocation', label: '临时存放' },
+      { key: 'status', label: '状态' }
     ]
   )
   ElMessage.success('出土物清单已导出')
@@ -213,14 +232,15 @@ function exportList(): void {
       <div>
         <h2 class="page-title">出土物登记与清单</h2>
         <p class="page-sub">
-          登记时先锁定所属地层单位（选择器按探方与类型级联），页面即时带出该单位的深度区间并校验出土深度是否落在区间内。
+          整理室台账：登记前先认单位号（选择器按探方与类型级联），页面即时带出该单位的深度区间；出土深度掉到区间外的先挂起待核，
+          等记录员核，件数与临时存放位置保持原样。
         </p>
       </div>
       <el-button @click="exportList">导出清单</el-button>
     </div>
 
     <el-card shadow="never" class="form-card">
-      <template #header>登记出土物（层位上下文锁定）</template>
+      <template #header>登记出土物（整理室持有 · 层位上下文锁定）</template>
       <UnitPicker
         v-model="pickStratumId"
         v-model:trench-id="pickTrenchId"
@@ -304,19 +324,36 @@ function exportList(): void {
       <el-select v-model="filterCategory" placeholder="全部类别" clearable style="width: 130px">
         <el-option v-for="item in ARTIFACT_CATEGORIES" :key="item" :label="item" :value="item" />
       </el-select>
+      <el-select v-model="filterStatus" placeholder="全部状态" clearable style="width: 120px">
+        <el-option label="已入账" value="registered" />
+        <el-option label="待核" value="pending" />
+      </el-select>
       <el-tag type="info" effect="plain">命中 {{ visible.length }} 条 · 合计 {{ totalCount }} 件</el-tag>
     </div>
 
-    <el-table :data="visible" border stripe row-key="id">
+    <el-table :data="visible" border stripe row-key="id" :row-class-name="rowClass">
       <el-table-column prop="code" label="器物编号" width="140" />
       <el-table-column label="探方" width="150">
         <template #default="{ row }: { row: Artifact }">
-          <span class="mono">{{ trenchOf(row.stratumId) }}</span>
+          <span class="mono">{{ trenchOf(row) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="地层单位" width="110">
+      <el-table-column label="地层单位" width="130">
         <template #default="{ row }: { row: Artifact }">
-          <span class="mono">{{ stratumOf(row.stratumId) }}</span>
+          <span class="mono">{{ stratumOf(row) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="状态" width="90">
+        <template #default="{ row }: { row: Artifact }">
+          <el-tooltip v-if="row.status === 'pending'" :content="row.pendingReason" placement="top">
+            <el-tag type="danger" size="small" effect="dark">待核</el-tag>
+          </el-tooltip>
+          <el-tag v-else type="success" size="small" effect="plain">已入账</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="归属" width="100">
+        <template #default>
+          <el-tag type="warning" size="small" effect="plain">整理室</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="深度区间" width="240">
